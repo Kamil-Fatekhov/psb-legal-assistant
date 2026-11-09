@@ -1,0 +1,17 @@
+AGENTS.md
+.agents/
+.codex/
+.claude/
+CLAUDE.md
+GEMINI.md
+.cursor/
+.cursorrules
+.github/copilot-instructions.md
+
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+.env.*
+!.env.example
+submission.csv
