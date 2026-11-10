@@ -23,3 +23,14 @@
 ```sh
 python -B -c "import contracts, knowledge.indexer, knowledge.search, knowledge.sources, assistant.service, web.chat, solution"
 ```
+
+## Локальная проверка поиска
+
+`CorpusIndexer.build()` принимает путь к папке с TXT и возвращает каталог `Corpus`.
+Эксперимент с эмбеддингами рассчитан на папку `knowledge-base/` в корне проекта.
+Для него нужны `langchain-community`, `langchain-text-splitters`, `langchain-huggingface`, `sentence-transformers`, `torch` и `numpy`.
+Запускайте из корня после установки этих зависимостей.
+
+```sh
+python -m knowledge.test
+```
