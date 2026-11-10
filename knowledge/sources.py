@@ -6,7 +6,6 @@ class SourceRepository:
         self.corpus = corpus
 
     def get_source(self, fragment_id: str) -> SourceView:
-        """Открыть исходный фрагмент по ID или поднять SourceNotFound."""
         fragment = self.corpus.fragments.get(fragment_id)
         if fragment is None:
             raise SourceNotFound(fragment_id)

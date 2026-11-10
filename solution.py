@@ -1,8 +1,4 @@
-"""Минимальный пример сабмита ПСБ: embeddings + rerank + LLM.
-
-Это учебный каркас, а не полноценное RAG-решение: используется только
-простой поиск по словам среди документов и короткие текстовые фрагменты.
-"""
+"""Точка входа сабмита с поиском по фрагментам базы знаний."""
 
 from __future__ import annotations
 
@@ -19,6 +15,14 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import httpx
+from dotenv import load_dotenv
+from langchain_core.documents import Document
+
+from contracts import Corpus, Fragment, SearchQuery
+from knowledge.indexer import CorpusIndexer
+from knowledge.search import SearchService
+
+load_dotenv(override=False)
 
 
 def env(name: str, default: str = "") -> str:
@@ -40,7 +44,6 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
-# Настройки приходят с платформы. В ZIP НЕ НУЖНО класть секреты и .env.
 DATA_DIR = Path(env("DATA_DIR", "data"))
 API_BASE = (env("LLM_BASE_URL") or env("BASE_URL") or env("OPENAI_BASE_URL")).rstrip("/")
 LLM_KEY = env("LLM_API_KEY") or env("OPENAI_API_KEY")
@@ -49,18 +52,17 @@ RERANK_KEY = env("RERANKER_API_KEY") or LLM_KEY
 
 LLM_MODEL = env("LLM_MODEL") or env("GEN_MODEL") or env("OPENAI_MODEL", "deepseek/deepseek-v4.1-flash")
 EMB_MODEL = env("EMB_MODEL", "baai/bge-m3")
-RERANKER_MODEL = env("RERANKER_MODEL", "cohere/rerank-5-fast")
+RERANKER_MODEL = env("RERANKER_MODEL")
 
-TOP_K = env_int("TOP_K", 4, 1, 8)
-RERANKER_TOP_N = env_int("RERANKER_TOP_N", 2, 1, 5)
+TOP_K = env_int("TOP_K", 10 if RERANKER_MODEL else 5, 1, 20)
+RERANKER_TOP_N = env_int("RERANKER_TOP_N", 5, 1, 20)
+EMBED_BATCH_SIZE = env_int("EMBED_BATCH_SIZE", 32, 1, 128)
 MAX_TOKENS = env_int("MAX_TOKENS", 1024, 128, 8192)
 MAX_WORKERS = env_int("MAX_WORKERS", 2, 1, 8)
 TEMPERATURE = env_float("TEMPERATURE", 0.0)
-CHUNKER = env("CHUNKER", "common")
-
-SNIPPET_CHARS = 1200
 FALLBACK = "Не удалось получить ответ."
 WORD_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]{4,}")
+API_ERRORS = (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError)
 
 
 def words(text: str) -> set[str]:
@@ -88,7 +90,6 @@ def load_questions(path: Path) -> list[tuple[str, str]]:
 
 
 def read_docx(raw: bytes) -> str:
-    # DOCX — это ZIP с XML. Пример обходится без дополнительной библиотеки.
     with zipfile.ZipFile(io.BytesIO(raw)) as doc:
         xml = doc.read("word/document.xml")
     root = ET.fromstring(xml)
@@ -99,7 +100,7 @@ def read_docx(raw: bytes) -> str:
     )
 
 
-def load_documents(path: Path) -> list[tuple[str, str]]:
+def load_documents(path: Path) -> list[Document]:
     documents = []
     with zipfile.ZipFile(path) as archive:
         for name in sorted(archive.namelist()):
@@ -115,20 +116,11 @@ def load_documents(path: Path) -> list[tuple[str, str]]:
                 print(f"Пропущен нечитаемый документ: {name}", file=sys.stderr)
                 continue
             if text.strip():
-                documents.append((name, text.strip()))
+                text = text.replace("\r\n", "\n").replace("\r", "\n")
+                documents.append(Document(page_content=text, metadata={"source": name}))
     if not documents:
         raise ValueError("В архиве базы знаний нет читаемых документов")
     return documents
-
-
-def snippet(text: str) -> str:
-    # Минимальный пример применения CHUNKER, не полноценное разбиение на чанки.
-    piece = text[:SNIPPET_CHARS]
-    if CHUNKER == "common" and len(text) > SNIPPET_CHARS:
-        boundary = piece.rfind("\n")
-        if boundary > SNIPPET_CHARS // 2:
-            piece = piece[:boundary]
-    return piece.strip()
 
 
 def post(client: httpx.Client, path: str, key: str, payload: dict) -> dict:
@@ -144,7 +136,6 @@ def post(client: httpx.Client, path: str, key: str, payload: dict) -> dict:
 
 
 def embeddings(client: httpx.Client, texts: list[str]) -> list[list[float]]:
-    """Пример вызова EMB_MODEL через POST /embeddings."""
     result = post(client, "/embeddings", EMBED_KEY, {
         "model": EMB_MODEL,
         "input": texts,
@@ -153,65 +144,105 @@ def embeddings(client: httpx.Client, texts: list[str]) -> list[list[float]]:
     vectors: list[list[float] | None] = [None] * len(texts)
     for position, item in enumerate(result["data"]):
         index = int(item.get("index", position))
-        if index < 0 or index >= len(texts):
+        if not 0 <= index < len(texts) or vectors[index] is not None:
             raise ValueError("Некорректный индекс embedding")
-        vector = item["embedding"]
-        norm = math.sqrt(sum(float(x) ** 2 for x in vector)) or 1.0
-        vectors[index] = [float(x) / norm for x in vector]
+        vector = [float(value) for value in item["embedding"]]
+        if not vector or not all(map(math.isfinite, vector)):
+            raise ValueError("API вернул некорректный вектор")
+        norm = math.hypot(*vector) or 1.0
+        vectors[index] = [value / norm for value in vector]
     if any(v is None for v in vectors):
         raise ValueError("Получены не все embeddings")
-    return vectors  # type: ignore[return-value]
+    return [vector for vector in vectors if vector is not None]
 
 
-def rerank(client: httpx.Client, question: str, docs: list[tuple[str, str]]) -> list[int]:
-    """Пример вызова RERANKER_MODEL через POST /rerank."""
+class ApiEmbedder:
+    def __init__(self, client: httpx.Client) -> None:
+        self.client = client
+
+    def embed_query(self, text: str) -> list[float]:
+        return embeddings(self.client, [text])[0]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            vectors.extend(embeddings(self.client, texts[start:start + EMBED_BATCH_SIZE]))
+        return vectors
+
+
+def rerank(client: httpx.Client, question: str, candidates: list[Fragment]) -> list[int]:
     result = post(client, "/rerank", RERANK_KEY, {
         "model": RERANKER_MODEL,
         "query": question,
-        "documents": [name + "\n" + snippet(text) for name, text in docs],
-        "top_n": min(RERANKER_TOP_N, len(docs)),
+        "documents": [fragment.text for fragment in candidates],
+        "top_n": min(RERANKER_TOP_N, len(candidates)),
     })
     items = result.get("results", result.get("data", []))
     indices = [int(item["index"]) for item in items]
-    return [i for i in indices if 0 <= i < len(docs)][:RERANKER_TOP_N]
+    return [i for i in dict.fromkeys(indices) if 0 <= i < len(candidates)][:RERANKER_TOP_N]
 
 
-def select_documents(client: httpx.Client, question: str,
-                     documents: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    # Простая предварительная выборка по совпадению слов; не полноценный RAG.
+def describe_api_error(error: Exception) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"{error.request.url.path}: HTTP {error.response.status_code}"
+    return type(error).__name__
+
+
+def create_search(corpus: Corpus, client: httpx.Client) -> SearchService | None:
+    fragment_ids = list(corpus.fragments)
+    embedder = ApiEmbedder(client)
+    try:
+        vectors = embedder.embed_documents([corpus.fragments[key].text for key in fragment_ids])
+        return SearchService(corpus, fragment_ids, vectors, embedder)
+    except API_ERRORS as exc:
+        print(f"Индекс недоступен ({describe_api_error(exc)}). Поиск по словам.", file=sys.stderr)
+        return None
+
+
+def select_by_words(question: str, corpus: Corpus) -> list[Fragment]:
     query_words = words(question)
-    candidates = sorted(
-        documents,
-        key=lambda d: len(query_words & words(d[0] + " " + d[1])),
+    return sorted(
+        corpus.fragments.values(),
+        key=lambda fragment: len(query_words & words(fragment.title + " " + fragment.text)),
         reverse=True,
     )[:TOP_K]
 
-    # Шаг 1: демонстрация использования эмбеддера.
-    try:
-        vectors = embeddings(client, [question] + [snippet(text) for _, text in candidates])
-        query_vec = vectors[0]
-        scores = [sum(a * b for a, b in zip(query_vec, vec)) for vec in vectors[1:]]
-        candidates = [candidates[i] for i in sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)]
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        print(f"Embeddings недоступны: {type(exc).__name__}; используем поиск по словам", file=sys.stderr)
 
-    # Шаг 2: демонстрация реранкера. При ошибке продолжаем без него.
-    try:
-        indices = rerank(client, question, candidates)
-        if indices:
-            return [candidates[i] for i in indices]
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        print(f"Reranker недоступен: {type(exc).__name__}; используем текущий порядок", file=sys.stderr)
-    return candidates[:RERANKER_TOP_N]
+def select_fragments(
+    client: httpx.Client, question: str, corpus: Corpus, search: SearchService | None
+) -> list[Fragment]:
+    if search is None:
+        candidates = select_by_words(question, corpus)
+    else:
+        try:
+            result = search.search(SearchQuery(text=question, top_k=TOP_K))
+            candidates = [hit.fragment for hit in result.hits]
+        except API_ERRORS as exc:
+            print(f"Векторный поиск недоступен ({describe_api_error(exc)}). Поиск по словам.", file=sys.stderr)
+            candidates = select_by_words(question, corpus)
+
+    if RERANKER_MODEL and candidates:
+        try:
+            indices = rerank(client, question, candidates)
+            if indices:
+                return [candidates[i] for i in indices]
+        except API_ERRORS as exc:
+            print(f"Реранкер недоступен ({describe_api_error(exc)}). Сохраняю порядок поиска.", file=sys.stderr)
+    return candidates
 
 
-def generate(client: httpx.Client, question: str, docs: list[tuple[str, str]]) -> str:
-    """Пример вызова LLM_MODEL через POST /chat/completions."""
-    context = "\n\n".join(name + "\n" + snippet(text) for name, text in docs)
+def generate(client: httpx.Client, question: str, fragments: list[Fragment]) -> str:
+    context = "\n\n".join(
+        f"Документ: {fragment.title}\nID: {fragment.fragment_id}\n{fragment.text}"
+        for fragment in fragments
+    )
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": "Ответь на вопрос по приложенным фрагментам. Не выдумывай юридические нормы. Если ответа нет, сообщи об этом."},
+            {"role": "system",
+             "content": "Ответь на последний вопрос пользователя по приложенным фрагментам. "
+                        "Для каждого юридически значимого вывода укажи документ и номер пункта, если он есть в тексте. "
+                        "Если данных не хватает, сообщи, каких именно. Не выдумывай основания."},
             {"role": "user", "content": "Фрагменты:\n" + context + "\n\nВопрос:\n" + question},
         ],
         "temperature": TEMPERATURE,
@@ -222,10 +253,10 @@ def generate(client: httpx.Client, question: str, docs: list[tuple[str, str]]) -
             result = post(client, "/chat/completions", LLM_KEY, payload)
             content = result["choices"][0]["message"].get("content", "")
             if isinstance(content, str) and content.strip():
-                return " ".join(content.split())  # одна физическая строка CSV
+                return " ".join(content.split())
             raise ValueError("Модель вернула пустой ответ")
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            print(f"LLM attempt {attempt + 1}: {type(exc).__name__}", file=sys.stderr)
+        except API_ERRORS as exc:
+            print(f"LLM attempt {attempt + 1}: {describe_api_error(exc)}", file=sys.stderr)
             if attempt == 0:
                 time.sleep(1)
     return FALLBACK
@@ -236,25 +267,34 @@ def main() -> None:
         raise ValueError("Нужны LLM_BASE_URL и LLM_API_KEY (или их аналоги)")
     questions = load_questions(find_file("questions.csv"))
     documents = load_documents(find_file("kb.zip", "knowledge-base.zip", "knowledge_base.zip"))
-    print(f"Вопросы: {len(questions)}; документы: {len(documents)}; TOP_K={TOP_K}", flush=True)
-
-    def work(position: int, question: str) -> tuple[int, str]:
-        try:
-            with httpx.Client(timeout=90.0) as client:
-                selected = select_documents(client, question, documents)
-                return position, generate(client, question, selected)
-        except Exception as exc:
-            print(f"Ошибка вопроса {position}: {type(exc).__name__}", file=sys.stderr)
-            return position, FALLBACK
+    corpus = CorpusIndexer().build_documents(documents)
+    if not corpus.fragments:
+        raise ValueError("В базе знаний нет фрагментов")
+    print(
+        f"Вопросы: {len(questions)}; документы: {len(documents)}; "
+        f"фрагменты: {len(corpus.fragments)}; TOP_K={TOP_K}",
+        flush=True,
+    )
 
     answers = [FALLBACK] * len(questions)
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(work, i, question) for i, (_, question) in enumerate(questions)]
-        for finished, future in enumerate(as_completed(futures), 1):
-            index, answer = future.result()
-            answers[index] = answer
-            if finished % 10 == 0 or finished == len(questions):
-                print(f"Обработано {finished}/{len(questions)}", flush=True)
+    with httpx.Client(timeout=90.0) as client:
+        search = create_search(corpus, client)
+
+        def work(position: int, question: str) -> tuple[int, str]:
+            try:
+                selected = select_fragments(client, question, corpus, search)
+                return position, generate(client, question, selected)
+            except Exception as exc:
+                print(f"Ошибка вопроса {position}: {describe_api_error(exc)}", file=sys.stderr)
+                return position, FALLBACK
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = [pool.submit(work, i, question) for i, (_, question) in enumerate(questions)]
+            for finished, future in enumerate(as_completed(futures), 1):
+                index, answer = future.result()
+                answers[index] = answer
+                if finished % 10 == 0 or finished == len(questions):
+                    print(f"Обработано {finished}/{len(questions)}", flush=True)
 
     with open("submission.csv", "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\n")

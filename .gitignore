@@ -15,3 +15,6 @@ __pycache__/
 .env.*
 !.env.example
 submission.csv
+knowledge/test.py
+knowledge/embeddings.npz
+data/search_results/
