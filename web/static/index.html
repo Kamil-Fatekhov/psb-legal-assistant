@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Юридический ассистент ПСБ</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#question">Перейти к вводу вопроса</a>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">ПСБ</span>
+        <span class="brand-name">Юридический ассистент</span>
+      </div>
+      <p id="mode-note" class="mode-note" title="Демо-режим: ответы из тестовой фикстуры, без модели и поиска" hidden>Демо-режим<span class="mode-detail">: ответы из тестовой фикстуры, без модели и поиска</span></p>
+      <button id="new-chat" class="btn btn-quiet" type="button">Новый диалог</button>
+    </header>
+
+    <main class="workspace">
+      <section class="conversation" aria-label="Диалог">
+        <div id="log" class="log" role="log" aria-live="polite" aria-relevant="additions">
+          <div id="empty" class="empty">
+            <h1 class="empty-title">Ответы по базе документов банка со ссылками на пункты</h1>
+            <p class="empty-text">
+              Ассистент ищет положения в договорах, регламентах и законах из базы знаний.
+              Каждый вывод сопровождается ссылкой — нажмите на номер, чтобы открыть текст пункта.
+              Если данных в базе не хватает, ассистент скажет, чего именно.
+            </p>
+            <p class="empty-label">Например:</p>
+            <ul class="examples">
+              <li><button class="example" type="button">Сколько платить за Северный Склад и когда?</button></li>
+              <li><button class="example" type="button">Какие условия в договоре с Альфа?</button></li>
+              <li><button class="example" type="button">Какая была арендная плата по Северному Складу в редакции 2019 года?</button></li>
+            </ul>
+          </div>
+        </div>
+
+        <form id="composer" class="composer" novalidate>
+          <label for="question" class="visually-hidden">Вопрос ассистенту</label>
+          <div class="composer-row">
+            <textarea id="question" name="question" rows="1" maxlength="4000"
+                      placeholder="Задайте вопрос по документам базы" autocomplete="off"></textarea>
+            <button id="send" class="btn btn-primary" type="submit">Отправить</button>
+          </div>
+          <p class="composer-hint"><kbd>Enter</kbd> — отправить, <kbd>Shift</kbd>+<kbd>Enter</kbd> — новая строка</p>
+        </form>
+      </section>
+
+      <aside id="source-panel" class="source-panel" aria-label="Текст источника" tabindex="-1">
+        <div class="source-placeholder" id="source-placeholder">
+          <p>Здесь откроется текст пункта, на который ссылается ответ.</p>
+          <p>Нажмите на номер ссылки рядом с выводом.</p>
+        </div>
+        <div class="source-view" id="source-view" hidden>
+          <div class="source-toolbar">
+            <button id="source-back" class="btn btn-quiet source-back" type="button">К диалогу</button>
+            <button id="source-copy" class="btn btn-quiet" type="button">Скопировать текст</button>
+            <button id="source-link" class="btn btn-quiet" type="button">Скопировать ссылку</button>
+            <button id="source-close" class="btn btn-icon" type="button" aria-label="Закрыть источник">×</button>
+          </div>
+          <article class="document" aria-live="polite">
+            <p class="doc-collection" id="doc-collection"></p>
+            <h2 class="doc-title" id="doc-title" tabindex="-1"></h2>
+            <dl class="doc-meta" id="doc-meta"></dl>
+            <div class="doc-body" id="doc-body"></div>
+            <p class="doc-id">ID фрагмента: <code id="doc-id"></code></p>
+          </article>
+          <p class="toast" id="toast" role="status" hidden></p>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <template id="tpl-user">
+    <div class="msg msg-user"><p class="msg-text"></p></div>
+  </template>
+</body>
+</html>

@@ -1,0 +1,4 @@
+# Тесты и проверка интерфейса в браузере.
+-r requirements.txt
+pytest==9.2.0
+playwright==1.65.0

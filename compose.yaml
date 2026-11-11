@@ -1,0 +1,15 @@
+# Запуск: docker compose up --build   →   http://localhost:8000
+services:
+  web:
+    build: .
+    image: psb-legal-assistant-web:latest
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data:ro
+    restart: unless-stopped
